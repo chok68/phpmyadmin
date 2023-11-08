@@ -1,5 +1,5 @@
 # phpmyadmin:5.2.1-apache
-FROM php:8.1-apache
+FROM php:8.2-apache
 
 # Install dependencies
 RUN set -ex; \
@@ -24,12 +24,14 @@ RUN set -ex; \
         mysqli \
         opcache \
         zip \
+        bcmath \
     ; \
     \
     apt-mark auto '.*' > /dev/null; \
     apt-mark manual $savedAptMark; \
-    ldd "$(php -r 'echo ini_get("extension_dir");')"/*.so \
-        | awk '/=>/ { print $3 }' \
+    extdir="$(php -r 'echo ini_get("extension_dir");')"; \
+    ldd "$extdir"/*.so \
+        | awk '/=>/ { so = $(NF-1); if (index(so, "/usr/local/") == 1) { next }; gsub("^/(usr/)?", "", so); print so }' \
         | sort -u \
         | xargs -r dpkg-query -S \
         | cut -d: -f1 \
@@ -37,13 +39,19 @@ RUN set -ex; \
         | xargs -rt apt-mark manual; \
     \
     apt-get purge -y --auto-remove -o APT::AutoRemove::RecommendsImportant=false; \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/*; \
+    ldd "$extdir"/*.so | grep -qzv "=> not found" || (echo "Sanity check failed: missing libraries:"; ldd "$extdir"/*.so | grep " => not found"; exit 1); \
+    ldd "$extdir"/*.so | grep -q "libzip.so.* => .*/libzip.so.*" || (echo "Sanity check failed: libzip.so is not referenced"; ldd "$extdir"/*.so; exit 1); \
+    err="$(php --version 3>&1 1>&2 2>&3)"; \
+    [ -z "$err" ] || (echo "Sanity check failed: php returned errors; $err"; exit 1;);
 
 # set recommended PHP.ini settings
 # see https://secure.php.net/manual/en/opcache.installation.php
 ENV MAX_EXECUTION_TIME 600
 ENV MEMORY_LIMIT 512M
 ENV UPLOAD_LIMIT 2048K
+ENV TZ UTC
+ENV SESSION_SAVE_PATH /sessions
 RUN set -ex; \
     \
     { \
@@ -66,6 +74,8 @@ RUN set -ex; \
         echo 'memory_limit=${MEMORY_LIMIT}'; \
         echo 'post_max_size=${UPLOAD_LIMIT}'; \
         echo 'upload_max_filesize=${UPLOAD_LIMIT}'; \
+        echo 'date.timezone=${TZ}'; \
+        echo 'session.save_path=${SESSION_SAVE_PATH}'; \
     } > $PHP_INI_DIR/conf.d/phpmyadmin-misc.ini
 
 # Calculate download URL
@@ -93,6 +103,9 @@ RUN set -ex; \
         gnupg \
         dirmngr \
     ; \
+    mkdir $SESSION_SAVE_PATH; \
+    chmod 1777 $SESSION_SAVE_PATH; \
+    chown www-data:www-data $SESSION_SAVE_PATH; \
     \
     export GNUPGHOME="$(mktemp -d)"; \
     export GPGKEY="3D06A59ECE730EB71B511C17CE752F178259BD92"; \
@@ -109,7 +122,7 @@ RUN set -ex; \
     chown www-data:www-data /var/www/html/tmp; \
     gpgconf --kill all; \
     rm -r "$GNUPGHOME" phpMyAdmin.tar.xz phpMyAdmin.tar.xz.asc; \
-    rm -r -v /var/www/html/setup/ /var/www/html/examples/ /var/www/html/js/src/ /var/www/html/templates/test/ /var/www/html/babel.config.json /var/www/html/doc/html/_sources/ /var/www/html/RELEASE-DATE-$VERSION /var/www/html/CONTRIBUTING.md; \
+    rm -r -v /var/www/html/setup/ /var/www/html/examples/ /var/www/html/js/src/ /var/www/html/babel.config.json /var/www/html/doc/html/_sources/ /var/www/html/RELEASE-DATE-$VERSION /var/www/html/CONTRIBUTING.md; \
     grep -q -F "'configFile' => ROOT_PATH . 'config.inc.php'," /var/www/html/libraries/vendor_config.php; \
     sed -i "s@'configFile' => .*@'configFile' => '/etc/phpmyadmin/config.inc.php',@" /var/www/html/libraries/vendor_config.php; \
     grep -q -F "'configFile' => '/etc/phpmyadmin/config.inc.php'," /var/www/html/libraries/vendor_config.php; \
@@ -129,10 +142,7 @@ COPY docker-entrypoint.sh /docker-entrypoint.sh
 ENTRYPOINT [ "/docker-entrypoint.sh" ]
 
 #Add a user ubuntu with UID 1001
-RUN useradd -rm -d /home/ubuntu -s /bin/bash -g root -G sudo -u 1001 ubuntu && \
-   chown -R ubuntu:root $CATALINA_HOME && \
-   chgrp -R 0 $CATALINA_HOME && \
-   chmod -R g=u $CATALINA_HOME
+RUN useradd -rm -d /home/ubuntu -s /bin/bash -g root -G sudo -u 1001 ubuntu
 
 #Specify the user with UID
 USER 1001
